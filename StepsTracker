@@ -1,0 +1,279 @@
+// StepsTracker.jsx
+// Single-file React component (default export) for a step-tracking web app.
+// Styling: Tailwind CSS assumed to be available globally.
+// Notes:
+//  - This is a frontend prototype. A production app requires a backend with auth,
+//    persistent storage, and realtime (WebSocket) or push notifications.
+//  - See the "API / Backend spec" section at the bottom for recommended endpoints
+//    and minimal DB schema.
+
+import React, { useEffect, useState, useRef } from "react";
+
+export default function StepsTrackerApp() {
+  // Simple auth-like flow (mock): store current user in localStorage
+  const [user, setUser] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("st_user")) || null } catch { return null }
+  });
+
+  const [profileName, setProfileName] = useState("");
+  const [stepsToday, setStepsToday] = useState(0);
+  const [history, setHistory] = useState([]); // [{date: '2025-08-10', steps: 4300}]
+  const [leaderboard, setLeaderboard] = useState([]);
+  const ws = useRef(null);
+  const [connected, setConnected] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  // Helper: format date key
+  const todayKey = () => new Date().toISOString().slice(0,10);
+
+  // Mock: local storage persistence per user
+  useEffect(() => {
+    if (!user) return;
+    const key = `st_data_${user.id}`;
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      setHistory(parsed.history || []);
+      setStepsToday(parsed.history?.find(h => h.date === todayKey())?.steps || 0);
+    } else {
+      setHistory([]);
+      setStepsToday(0);
+    }
+  }, [user]);
+
+  // Recompute leaderboard (simple local aggregate across all users stored in localStorage)
+  useEffect(() => {
+    refreshLeaderboard();
+  }, [user]);
+
+  function saveLocalData(newHistory) {
+    if (!user) return;
+    const key = `st_data_${user.id}`;
+    localStorage.setItem(key, JSON.stringify({ history: newHistory }));
+  }
+
+  function addSteps(delta) {
+    if (!user) { alert('Please sign in first.'); return }
+    const d = todayKey();
+    const newHistory = [...history];
+    const idx = newHistory.findIndex(h => h.date === d);
+    if (idx >= 0) newHistory[idx].steps += delta;
+    else newHistory.push({ date: d, steps: delta });
+    setHistory(newHistory);
+    setStepsToday(prev => prev + delta);
+    saveLocalData(newHistory);
+    // publish to "server" (mock): store a global list in localStorage to simulate many users
+    publishStepUpdate(user.id, user.name, d, delta);
+  }
+
+  function publishStepUpdate(userId, name, date, delta) {
+    // Simulate server-side update by storing in a global key
+    const globalKey = 'st_global_updates';
+    const raw = localStorage.getItem(globalKey);
+    const list = raw ? JSON.parse(raw) : [];
+    list.push({ userId, name, date, delta, ts: Date.now() });
+    localStorage.setItem(globalKey, JSON.stringify(list));
+    // Also update a "registry" that holds each user's total for leaderboard
+    updateGlobalProfile(userId, name, date, delta);
+    // Dispatch a StorageEvent-like effect by manually calling refreshLeaderboard for this UI
+    refreshLeaderboard();
+  }
+
+  function updateGlobalProfile(userId, name, date, delta) {
+    const key = 'st_global_profiles';
+    const raw = localStorage.getItem(key);
+    const profiles = raw ? JSON.parse(raw) : {};
+    if (!profiles[userId]) profiles[userId] = { id: userId, name, total: 0, lastDate: date };
+    profiles[userId].total += delta;
+    profiles[userId].lastDate = date;
+    localStorage.setItem(key, JSON.stringify(profiles));
+  }
+
+  function refreshLeaderboard() {
+    const key = 'st_global_profiles';
+    const raw = localStorage.getItem(key);
+    const profiles = raw ? JSON.parse(raw) : {};
+    const list = Object.values(profiles).sort((a,b)=> b.total - a.total).slice(0,20);
+    setLeaderboard(list);
+  }
+
+  function signInMock(name) {
+    const id = `u_${name.toLowerCase().replace(/[^a-z0-9]/g,'')}_${Math.floor(Math.random()*10000)}`;
+    const u = { id, name };
+    localStorage.setItem('st_user', JSON.stringify(u));
+    setUser(u);
+    setProfileName('');
+  }
+
+  function signOut() {
+    localStorage.removeItem('st_user');
+    setUser(null);
+    setHistory([]);
+    setStepsToday(0);
+  }
+
+  function exportCSV() {
+    if (!user) return;
+    const rows = [['date','steps'], ...history.map(h=>[h.date, String(h.steps)])];
+    const csv = rows.map(r=>r.join(',')).join('\n');
+    const blob = new Blob([csv], {type:'text/csv'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${user.name || 'user'}-steps.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // Basic WebSocket mock: simulate connected/disconnected
+  function connectMockSocket() {
+    setConnected(true);
+    // In a real app, you'd do: ws.current = new WebSocket('wss://yourserver/steps');
+  }
+
+  function disconnectMockSocket() {
+    setConnected(false);
+  }
+
+  // UI
+  return (
+    <div className="min-h-screen bg-gray-50 p-6">
+      <div className="max-w-5xl mx-auto bg-white shadow-md rounded-2xl p-6">
+        <header className="flex justify-between items-center mb-6">
+          <h1 className="text-2xl font-bold">StepsTracker</h1>
+          <div className="flex items-center gap-3">
+            {user ? (
+              <>
+                <div className="text-sm">Signed in as <strong>{user.name}</strong></div>
+                <button onClick={signOut} className="px-3 py-1 rounded bg-red-500 text-white text-sm">Sign out</button>
+              </>
+            ) : (
+              <MockSignIn onSignIn={signInMock} profileName={profileName} setProfileName={setProfileName} />
+            )}
+          </div>
+        </header>
+
+        <main className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <section className="md:col-span-2 bg-gray-100 p-4 rounded">
+            <h2 className="text-lg font-semibold mb-2">Your Day</h2>
+            <div className="flex items-center gap-6">
+              <div className="flex-1">
+                <div className="text-6xl font-extrabold">{stepsToday}</div>
+                <div className="text-sm text-gray-600">steps today</div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={()=>addSteps(100)} className="px-3 py-2 rounded bg-blue-600 text-white">+100</button>
+                <button onClick={()=>addSteps(500)} className="px-3 py-2 rounded bg-blue-600 text-white">+500</button>
+                <button onClick={()=>addSteps(1000)} className="px-3 py-2 rounded bg-green-600 text-white">+1000</button>
+                <button onClick={()=>{ if(confirm('Reset today?')) { setStepsToday(0); const nh = history.filter(h=>h.date!==todayKey()); setHistory(nh); saveLocalData(nh); }}} className="px-3 py-2 rounded bg-gray-300">Reset</button>
+              </div>
+            </div>
+
+            <div className="mt-6">
+              <h3 className="font-medium">History</h3>
+              <div className="mt-2 space-y-1 text-sm">
+                {history.length === 0 && <div className="text-gray-500">No data yet.</div>}
+                {history.slice().reverse().map(h => (
+                  <div key={h.date} className="flex justify-between bg-white p-2 rounded"> 
+                    <div>{h.date}</div>
+                    <div className="font-semibold">{h.steps} steps</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+          </section>
+
+          <aside className="bg-white p-4 rounded">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-medium">Leaderboard</h3>
+              <div className="text-xs text-gray-500">Top movers</div>
+            </div>
+            <ol className="space-y-2 text-sm">
+              {leaderboard.length === 0 && <div className="text-gray-500">No entries yet.</div>}
+              {leaderboard.map((p, idx) => (
+                <li key={p.id} className="flex justify-between items-center bg-gray-50 p-2 rounded">
+                  <div className="flex items-center gap-2">
+                    <div className="w-7 text-right">{idx+1}.</div>
+                    <div>{p.name}</div>
+                  </div>
+                  <div className="font-semibold">{p.total}</div>
+                </li>
+              ))}
+            </ol>
+
+            <div className="mt-4 space-y-2">
+              <button onClick={exportCSV} className="w-full px-3 py-2 rounded bg-indigo-600 text-white">Export my CSV</button>
+              <button onClick={()=>{connectMockSocket();}} className={`w-full px-3 py-2 rounded ${connected? 'bg-green-500 text-white':'bg-gray-200'}`}>{connected? 'Connected':'Connect'}</button>
+            </div>
+
+            <div className="mt-4 text-xs text-gray-500">
+              This demo uses localStorage to simulate many users. For a real multi-user app, connect to a backend API and WebSocket server.
+            </div>
+          </aside>
+        </main>
+
+      </div>
+    </div>
+  );
+}
+
+function MockSignIn({ onSignIn, profileName, setProfileName }){
+  return (
+    <div className="flex items-center gap-2">
+      <input value={profileName} onChange={(e)=>setProfileName(e.target.value)} placeholder="Your name" className="px-3 py-1 border rounded" />
+      <button onClick={()=>{ if(!profileName.trim()) return alert('Enter a name'); onSignIn(profileName.trim()) }} className="px-3 py-1 rounded bg-green-600 text-white">Sign in</button>
+    </div>
+  );
+}
+
+/*
+API / Backend spec (recommended)
+
+1) Authentication
+POST /api/auth/signup  { name, email, password }
+POST /api/auth/login   { email, password }  -> returns JWT / session cookie
+
+2) User profile
+GET /api/users/me -> { id, name, email, joinedAt }
+PUT /api/users/me -> update profile
+
+3) Steps data
+POST /api/steps  { date: 'YYYY-MM-DD', steps: 1234 } -> stores user's steps for a date
+GET  /api/steps?start=YYYY-MM-DD&end=YYYY-MM-DD -> [{date, steps}, ...]
+
+4) Leaderboard
+GET /api/leaderboard?period=daily|weekly|monthly&limit=20 -> [{userId, name, total}, ...]
+
+5) Realtime (optional)
+WebSocket wss://yourserver/steps
+ - On connect: client sends auth token
+ - Server broadcasts: { type: 'update', payload: { userId, name, date, newTotal } }
+
+DB schema (simplified):
+users { id (uuid), name, email, password_hash, created_at }
+steps { id, user_id, date (date), steps (int), created_at }
+
+Indexing: index steps on (user_id, date). For leaderboard, maintain an aggregated table or compute periodically.
+
+Scaling notes:
+ - Use pagination for history endpoints
+ - Use Redis or materialized views for leaderboard to avoid heavy queries
+ - Use rate-limits for step submissions (prevent fraud)
+ - Consider third-party device sync (Google Fit / Apple Health / Fitbit) via OAuth for automatic step pulls
+
+Security:
+ - Validate dates and steps on server
+ - Authenticate all endpoints
+ - Use HTTPS and sign WebSocket tokens
+
+Deployment:
+ - Frontend: Vercel / Netlify / static hosting
+ - Backend: Node/Express, Go, or Python; host on managed services (Heroku, Fly, AWS ECS)
+ - Realtime: use Socket.IO, Pusher, or AWS AppSync for scaling
+
+This single-file frontend is a starting point. I can also generate:
+ - a backend boilerplate (Node/Express + SQLite/Postgres) with the API above
+ - a prettier multi-file React + Vite project scaffold
+ - integration examples for Google Fit / Apple Health
+
+*/
